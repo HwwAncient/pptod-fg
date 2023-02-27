@@ -7,6 +7,7 @@ sdist
 var
 *.pyc
 *.swp
+*.out
 .DS_Store
 .dinger
 .idea
