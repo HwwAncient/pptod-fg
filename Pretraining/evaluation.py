@@ -62,12 +62,14 @@ def evaluate_by_loss(data_loader, best_dev_loss, model, args, epoch, global_step
         for dev_batch in dev_pbar:
             dev_batch = type(dev_batch)(map(lambda item: item.to(args.device), dev_batch))
             loss = model(*dev_batch)
-            if dist.is_initialized():
-                loss = reduce_mean_across_procs(tensor=loss, world_size=args.world_size)
             dev_loss += loss.item()
 
         # compute metric
         dev_loss /= num_dev_batches_per_epoch
+        if dist.is_initialized():
+            dev_loss = torch.tensor(dev_loss).to(args.device)
+            dev_loss = reduce_mean_across_procs(tensor=dev_loss, world_size=args.world_size).item()
+
         print_rank_0('current dev loss is {}, minimum dev loss is {}'.format(round(dev_loss, 2), round(best_dev_loss, 2)))
 
         # save
@@ -102,13 +104,13 @@ def evaluate_by_bleu(data_loader, best_dev_bleu, model, args, epoch, global_step
             dev_batch_src_tensor, dev_batch_src_mask, dev_batch_input, dev_batch_labels = dev_batch
             dev_batch_pred = batch_prediction(dev_batch_src_tensor, dev_batch_src_mask, return_tensor=True)
 
-            if dist.is_initialized():
-                dev_batch_pred = gather_across_procs(tensor=dev_batch_pred, world_size=args.world_size,
-                                                     max_len=model.module.max_tgt_len,
-                                                     padding_value=model.module.pad_token_id)
-                dev_batch_input = gather_across_procs(tensor=dev_batch_input, world_size=args.world_size,
-                                                      max_len=model.module.max_tgt_len,
-                                                      padding_value=model.module.pad_token_id)
+            # if dist.is_initialized():
+            #     dev_batch_pred = gather_across_procs(tensor=dev_batch_pred, world_size=args.world_size,
+            #                                          max_len=model.module.max_tgt_len,
+            #                                          padding_value=model.module.pad_token_id)
+            #     dev_batch_input = gather_across_procs(tensor=dev_batch_input, world_size=args.world_size,
+            #                                           max_len=model.module.max_tgt_len,
+            #                                           padding_value=model.module.pad_token_id)
 
             dev_pred_text_list += parse_batch_text(dev_batch_pred)
             dev_refer_text_list += parse_batch_text(dev_batch_input)
@@ -116,20 +118,25 @@ def evaluate_by_bleu(data_loader, best_dev_bleu, model, args, epoch, global_step
         # compute metric
         assert len(dev_pred_text_list) == len(dev_refer_text_list)
         dev_bleu = calc_bleu(preds=dev_pred_text_list, targets=dev_refer_text_list)
+        if dist.is_initialized():
+            dev_bleu = torch.tensor(dev_bleu).to(args.device)
+            dev_bleu = reduce_mean_across_procs(tensor=dev_bleu, world_size=args.world_size).item()
+
         print_rank_0('current dev bleu is {}, maximum dev bleu is {}'.format(round(dev_bleu, 4), round(best_dev_bleu, 4)))
 
         # save
-        if (dev_bleu > best_dev_bleu) and (args.local_rank == -1 or args.rank == 0):
-            # saving the model with the lowest validation bleu
+        if dev_bleu > best_dev_bleu:
             model_save_path = os.path.join(args.save_path, f'{args.save_ckpt_name}_epoch{epoch}_iter{global_step}')
-            save(model=model, model_save_path=model_save_path)
+            if args.local_rank == -1 or args.rank == 0:
+                # saving the model with the lowest validation bleu
+                save(model=model, model_save_path=model_save_path)
+                # removing extra checkpoints
+                remove_extra_files(args=args)
             # saving predicted files
-            dev_pred_save_path = os.path.join(model_save_path, 'dev_predicted_result.txt')
+            dev_pred_save_path = os.path.join(model_save_path, f'dev_predicted_result_{args.rank}.txt')
             save_file(text_list=dev_pred_text_list, file_save_path=dev_pred_save_path)
-            dev_refer_save_path = os.path.join(model_save_path, 'dev_reference_result.txt')
+            dev_refer_save_path = os.path.join(model_save_path, f'dev_reference_result_{args.rank}.txt')
             save_file(text_list=dev_refer_text_list, file_save_path=dev_refer_save_path)
-            # removing extra checkpoints
-            remove_extra_files(args=args)
 
         best_dev_bleu = max(dev_bleu, best_dev_bleu)
     return best_dev_bleu

@@ -83,7 +83,7 @@ if __name__ == '__main__':
             dataset = LazyDataset(data_file)
 
         if dist.is_initialized():
-            data_sampler = DistributedSampler(dataset, shuffle=(mode == "train"))
+            data_sampler = DistributedSampler(dataset, shuffle=(mode == "train"), seed=args.seed)
             data_loader = DataLoader(dataset, batch_size=args.batch_size_per_gpu,
                                      sampler=data_sampler, collate_fn=data.collate_fn)
         else:
