@@ -58,7 +58,7 @@ class PRETRAINING_CORPUS:
             samples = json.load(fr)
 
         for sample in tqdm(samples):
-            src = sample['src_id_list'][-self.max_src_len:]
+            src = sample['src_id_list'][-self.max_src_len:]  # TODO truncate beyond instructions
             tgt = sample['tgt_id_list']
             if mode == "train":
                 tgt = tgt[:-1][:self.max_tgt_len] + [self.eos_g_token_id]

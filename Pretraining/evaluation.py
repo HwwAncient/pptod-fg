@@ -10,14 +10,8 @@ from utils import print_rank_0, gather_across_procs, reduce_mean_across_procs
 
 def save(model, model_save_path):
     print_rank_0('Saving model...')
-    if os.path.exists(model_save_path):
-        pass
-    else:  # recursively construct directory
-        os.makedirs(model_save_path, exist_ok=True)
-    if dist.is_initialized():
-        model.module.save_model(model_save_path)
-    else:
-        model.save_model(model_save_path)
+    save_model = model.module.save_model if dist.is_initialized() else model.save_model
+    save_model(model_save_path)
     print_rank_0(f'Model saved at {model_save_path}.')
 
 
@@ -127,6 +121,8 @@ def evaluate_by_bleu(data_loader, best_dev_bleu, model, args, epoch, global_step
         # save
         if dev_bleu > best_dev_bleu:
             model_save_path = os.path.join(args.save_path, f'{args.save_ckpt_name}_epoch{epoch}_iter{global_step}')
+            if not os.path.exists(model_save_path):
+                os.makedirs(model_save_path, exist_ok=True)
             if args.local_rank == -1 or args.rank == 0:
                 # saving the model with the lowest validation bleu
                 save(model=model, model_save_path=model_save_path)
