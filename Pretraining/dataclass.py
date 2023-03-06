@@ -1,19 +1,20 @@
 import os
 import json
 import torch
+import argparse
 
 from tqdm import tqdm
 from torch.nn.utils import rnn
 from utils import print_rank_0
 
 
-def map_bool(bool_status):
-    if bool_status == 'True':
+def str2bool(v):
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
         return True
-    elif bool_status == 'False':
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
         return False
     else:
-        raise Exception('Wrong Bool Status')
+        raise argparse.ArgumentTypeError('Unsupported value encountered.')
 
 
 # TODO set as params

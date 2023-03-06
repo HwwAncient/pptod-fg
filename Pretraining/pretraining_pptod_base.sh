@@ -2,7 +2,7 @@
 set -ux
 
 # CUDA environment settings.
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=4,5
 
 # Parameters.
 PROJECT_NAME=pptod-fg
@@ -12,12 +12,13 @@ DATASET_PREFIX_PATH=${SAVE_ROOT}/data/pre-training_corpora/tokenized_pretraining
 SAVE_PATH=${SAVE_ROOT}/checkpoints_ddp_test
 
 # Main run.
-python -m torch.distributed.launch --nproc_per_node=4 \
+python -m torch.distributed.launch --nproc_per_node=2 \
   ${PROJECT_ROOT}/Pretraining/pretrain.py \
   --dataset_prefix_path ${DATASET_PREFIX_PATH} \
   --save_path ${SAVE_PATH} \
   --save_ckpt_name t5-base-chinese-cluecorpussmall \
   --model_name uer/t5-base-chinese-cluecorpussmall \
+  --use_amp true \
   --learning_rate 5e-5 \
   --num_train_epochs 10 \
   --batch_size_per_gpu 6 \

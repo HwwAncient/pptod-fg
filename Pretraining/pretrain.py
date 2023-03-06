@@ -8,7 +8,7 @@ import torch.distributed as dist
 
 from tqdm import tqdm
 from dataset import LazyDataset
-from dataclass import PRETRAINING_CORPUS
+from dataclass import PRETRAINING_CORPUS, str2bool
 from utils import torch_distributed_zero_first, print_rank_0
 from evaluation import evaluate_by_loss, evaluate_by_bleu
 from modelling.T5Model import T5Gen_Model
@@ -40,11 +40,12 @@ def parse_config():
     parser.add_argument("--warmup_steps", default=-1, type=int, help="Linear warmup over warmup_steps.")
     parser.add_argument("--num_train_epochs", default=10, type=int, help="Total number of training epochs to perform.")
     parser.add_argument("--batch_size_per_gpu", type=int, default=4, help='Batch size for each gpu.')
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=2, help="gradient accumulation step.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="gradient accumulation step.")
     parser.add_argument("--save_steps", type=int, default=5000, help="Save checkpoint every X updates steps.")
     parser.add_argument("--save_path", type=str, help="Directory to save the model parameters.")
     parser.add_argument("--save_ckpt_name", type=str, help="The name under which to save the pre-trained model. small or base or large")
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank for distributed training on gpus")
+    parser.add_argument("--use_amp", type=str2bool, default=False, help="Whether to use automatic mixed precision training.")
     return parser.parse_args()
 
 
@@ -53,6 +54,7 @@ if __name__ == '__main__':
 
     # setup CUDA, GPU & distributed training
     if args.local_rank == -1:
+        args.use_amp = False  # TODO verify it
         args.device = torch.device("cpu")
         args.world_size = 1
         args.rank = 0
@@ -65,6 +67,7 @@ if __name__ == '__main__':
         args.rank = dist.get_rank()
         args.n_gpu = 1
     print(f"[Distributed info]: world_size {args.world_size}, rank {args.rank}, local rank {args.local_rank}.")
+    print_rank_0(f"[Mixed Precision Training]: {args.use_amp}")
 
     def set_seed(seed):
         """ fix random seed """
@@ -157,6 +160,9 @@ if __name__ == '__main__':
     optimizer, scheduler = set_optimizers(num_training_steps_per_epoch=num_training_steps_per_epoch)
     optimizer.zero_grad()
 
+    # Creates a GradScaler once at the beginning of training.
+    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp)
+
     # --- training --- #
     global_step, best_dev_loss, best_dev_bleu = 0, 1e10, 0
     for epoch in range(1, args.num_train_epochs + 1):
@@ -175,25 +181,36 @@ if __name__ == '__main__':
         epoch_step, train_loss = 0, 0.
         for train_batch in train_pbar:
             train_batch = type(train_batch)(map(lambda item: item.to(args.device), train_batch))
-            loss = model(*train_batch)
-            train_loss += loss.item()
-            epoch_step += 1
 
-            if args.local_rank == -1 or args.rank == 0:
-                train_pbar.set_description(f'Epoch: {epoch}, global_step: {global_step}, '
-                                           f'avg_loss: {round(train_loss / epoch_step, 2)}, '
-                                           f'cur_loss: {round(loss.item(), 2)}')
-
-            if args.gradient_accumulation_steps > 1:
+            # Runs the forward pass with autocasting.
+            with torch.cuda.amp.autocast(enabled=args.use_amp):  # Note: pytorch 1.8.0 usage
+                loss = model(*train_batch)
+                train_loss += loss.item()
+                epoch_step += 1
+                if args.local_rank == -1 or args.rank == 0:
+                    train_pbar.set_description(f'Epoch: {epoch}, global_step: {global_step}, '
+                                               f'avg_loss: {round(train_loss / epoch_step, 2)}, '
+                                               f'cur_loss: {round(loss.item(), 2)}')
                 loss = loss / args.gradient_accumulation_steps
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+
+            # Scales loss. Calls backward() on scaled loss to create scaled gradients.
+            scaler.scale(loss).backward()
 
             if epoch_step % args.gradient_accumulation_steps == 0 or \
                     epoch_step == num_training_batches_per_epoch:
-                optimizer.step()
+
+                # Unscales the gradients of optimizer's assigned params in-place
+                scaler.unscale_(optimizer)
+                # Since the gradients of optimizer's assigned params are unscaled, clips as usual:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                # optimizer's gradients are already unscaled, so scaler.step does not unscale them,
+                # although it still skips optimizer.step() if the gradients contain infs or NaNs.
+                scaler.step(optimizer)
+                # Updates the scale for next iteration.
+                scaler.update()
+
                 scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad()  # set_to_none=True here can modestly improve performance
                 global_step += 1
 
                 if global_step > 0 and global_step % args.save_steps == 0:
